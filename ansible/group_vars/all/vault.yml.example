@@ -1,0 +1,4 @@
+# Create the real, encrypted file with:
+#   ansible-vault create group_vars/all/vault.yml
+# and put this line in it with your token:
+vault_cloudflare_api_token: "replace-with-cloudflare-token"

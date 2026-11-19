@@ -1,0 +1,29 @@
+# Settings for calls to the zrok2 admin API. Calls run from the operator's
+# machine over HTTPS, so passwords travel only in the request body and never
+# appear in a process's arguments.
+- name: Set admin API settings
+  ansible.builtin.set_fact:
+    zrok_api: "https://zrok2.{{ zrok_dns_zone }}/api/v2"
+    zrok_api_headers:
+      x-token: "{{ zrok2_admin_token }}"
+      Content-Type: application/zrok.v1+json
+      Accept: application/zrok.v1+json
+  no_log: true
+
+# 200 for an existing account, 404 for an unknown one.
+- name: Check whether the account exists
+  ansible.builtin.uri:
+    url: "{{ zrok_api }}/applied-limit-class/list"
+    method: POST
+    headers: "{{ zrok_api_headers }}"
+    body_format: json
+    body: { email: "{{ account_email }}" }
+    status_code: [200, 404]
+  register: account_lookup
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Record whether the account exists
+  ansible.builtin.set_fact:
+    account_exists: "{{ account_lookup.status == 200 }}"

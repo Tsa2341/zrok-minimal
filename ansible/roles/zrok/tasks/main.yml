@@ -1,0 +1,177 @@
+- name: Set derived names
+  ansible.builtin.set_fact:
+    caddy_image: "zrok-minimal/caddy:{{ caddy_version }}-cloudflare"
+    caddy_platform: "linux/{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts.architecture] }}"
+    caddy_tar_name: "caddy-{{ caddy_version }}-{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts.architecture] }}.tar"
+
+# Caddy is compiled on the operator's machine, never on the small server.
+- name: Create local build directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/.build"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build the Caddy image locally
+  ansible.builtin.command:
+    argv:
+      - docker
+      - buildx
+      - build
+      - --platform
+      - "{{ caddy_platform }}"
+      - --build-arg
+      - "CADDY_VERSION={{ caddy_version }}"
+      - --tag
+      - "{{ caddy_image }}"
+      - --load
+      - "{{ playbook_dir }}/../caddy"
+    creates: "{{ playbook_dir }}/.build/{{ caddy_tar_name }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Export the Caddy image
+  ansible.builtin.command:
+    argv: [docker, save, --output, "{{ playbook_dir }}/.build/{{ caddy_tar_name }}", "{{ caddy_image }}"]
+    creates: "{{ playbook_dir }}/.build/{{ caddy_tar_name }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Create the stack directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ zrok_dir }}"
+    - "{{ zrok_dir }}/rabbitmq"
+
+- name: Copy the Caddy image
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/.build/{{ caddy_tar_name }}"
+    dest: "{{ zrok_dir }}/{{ caddy_tar_name }}"
+    mode: "0600"
+  register: caddy_tar
+
+- name: Check for the Caddy image
+  ansible.builtin.command: "docker image inspect {{ caddy_image }}"
+  register: caddy_present
+  changed_when: false
+  failed_when: false
+
+- name: Load the Caddy image
+  ansible.builtin.command: "docker load --input {{ zrok_dir }}/{{ caddy_tar_name }}"
+  when: caddy_tar is changed or caddy_present.rc != 0
+
+- name: Copy stack files
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../compose/{{ item.src }}"
+    dest: "{{ zrok_dir }}/{{ item.src }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: compose.yml, mode: "0644" }
+    - { src: Caddyfile, mode: "0644" }
+    - { src: entrypoint-init.bash, mode: "0644" }
+    - { src: rabbitmq/enabled_plugins, mode: "0644" }
+  register: stack_files
+
+- name: Write .env
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ zrok_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: env_file
+
+# Owned by the rabbitmq user inside the image (uid 100) so only it can read the password.
+- name: Write RabbitMQ config
+  ansible.builtin.template:
+    src: 30-zrok.conf.j2
+    dest: "{{ zrok_dir }}/rabbitmq/30-zrok.conf"
+    owner: "100"
+    group: "101"
+    mode: "0400"
+  register: rabbitmq_conf
+
+- name: Pull images
+  ansible.builtin.command:
+    argv: [docker, compose, pull, --quiet, ziti-controller, ziti-router, rabbitmq, zrok2-controller]
+    chdir: "{{ zrok_dir }}"
+  register: pull
+  changed_when: false
+
+- name: Start the stack
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans
+    chdir: "{{ zrok_dir }}"
+  changed_when: true
+
+- name: Wait for the zrok2 controller
+  ansible.builtin.command:
+    cmd: docker compose exec -T zrok2-controller curl -sf http://127.0.0.1:18080/api/v1/version
+    chdir: "{{ zrok_dir }}"
+  register: ctrl_health
+  until: ctrl_health.rc == 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
+# The controller binds dynamicProxyController once at startup; if the router was
+# not online yet, share names never resolve until it is restarted.
+- name: Check the dynamicProxyController terminator
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - ziti-controller
+      - bash
+      - -c
+      - >-
+        ziti edge login "https://ziti.{{ zrok_dns_zone }}:1280" -u admin -p "$ZITI_PWD" -y >/dev/null &&
+        ziti edge list terminators 'service.name="dynamicProxyController"' -j | grep -q '"id"'
+    chdir: "{{ zrok_dir }}"
+  register: terminator
+  retries: 6
+  delay: 10
+  until: terminator.rc == 0
+  failed_when: false
+  changed_when: false
+
+- name: Restart the controller and frontend to bind the service
+  ansible.builtin.command:
+    cmd: docker compose restart zrok2-controller zrok2-frontend
+    chdir: "{{ zrok_dir }}"
+  when: terminator.rc != 0
+
+- name: Wait for HTTPS on the API
+  ansible.builtin.uri:
+    url: "https://zrok2.{{ zrok_dns_zone }}/api/v2/versions"
+    headers:
+      Accept: application/zrok.v1+json
+    validate_certs: "{{ 'staging' not in caddy_acme_ca }}"
+  register: https_health
+  until: https_health.status == 200
+  retries: 30
+  delay: 10
+  delegate_to: localhost
+  become: false
+
+- name: Show container status
+  ansible.builtin.command:
+    cmd: docker compose ps --format "table {{ '{{' }}.Service{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}"
+    chdir: "{{ zrok_dir }}"
+  register: ps
+  changed_when: false
+
+- name: Container status
+  ansible.builtin.debug:
+    msg: "{{ ps.stdout_lines }}"

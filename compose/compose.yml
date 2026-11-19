@@ -1,0 +1,286 @@
+# zrok-minimal: a trimmed self-hosted zrok2 stack.
+#
+# Derived from openziti/zrok docker/compose/zrok2-instance (commit d8e5316).
+# Removed: PostgreSQL (SQLite instead), InfluxDB, metrics bridge, RabbitMQ
+# management UI, the Caddy compile at startup, the Ziti management route on 443.
+#
+# Values come from .env next to this file (written by Ansible).
+
+x-zrok2-image: &zrok2-image
+  image: docker.io/openziti/zrok2:${ZROK2_TAG}
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  ziti-controller:
+    image: docker.io/openziti/ziti-controller:${ZITI_TAG}
+    <<: *logging
+    environment:
+      ZITI_BOOTSTRAP: "true"
+      ZITI_BOOTSTRAP_CLUSTER: "true"
+      ZITI_CTRL_ADVERTISED_ADDRESS: ziti.${ZROK2_DNS_ZONE:?err}
+      ZITI_CTRL_ADVERTISED_PORT: "1280"
+      ZITI_USER: admin
+      ZITI_PWD: ${ZITI_PWD:?err}
+      ZITI_CLUSTER_TRUST_DOMAIN: ${ZROK2_DNS_ZONE}
+      ZITI_CLUSTER_NODE_NAME: ziti-ctrl
+      PFXLOG_NO_JSON: "true"
+    volumes:
+      - ziti-ctrl-data:/ziti-controller
+    # Public: zrok clients talk to the Ziti controller directly with the
+    # config the zrok controller returns at enable time.
+    ports:
+      - "0.0.0.0:1280:1280"
+    networks:
+      zrok2:
+        aliases:
+          - ziti.${ZROK2_DNS_ZONE}
+    healthcheck:
+      test: ["CMD", "ziti", "agent", "stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    mem_limit: 200m
+    restart: unless-stopped
+
+  # One-shot: creates the edge router and its enrollment JWT. Idempotent.
+  ziti-router-init:
+    image: docker.io/openziti/ziti-controller:${ZITI_TAG}
+    <<: *logging
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -o errexit -o nounset -o pipefail
+        retry() {
+          local max="$$1" delay="$$2" desc="$$3"; shift 3
+          local n=1
+          until "$$@"; do
+            if (( n >= max )); then echo "ERROR: $$desc failed after $$max attempts" >&2; exit 1; fi
+            echo "WARN: $$desc failed (attempt $$n/$$max), retrying in $${delay}s..."
+            sleep "$$delay"; (( n++ ))
+          done
+        }
+        ROUTER_NAME=zrok2-router
+        JWT_FILE="/ziti-router/$${ROUTER_NAME}.jwt"
+        retry 60 5 "Ziti controller login" \
+          ziti edge login "https://ziti.$${ZROK2_DNS_ZONE}:1280" \
+            --username admin --password "$${ZITI_PWD}" --yes
+        if [[ -f "/ziti-router/$${ROUTER_NAME}.cert.pem" || -f /ziti-router/certs/cert.pem ]]; then
+          echo "INFO: router identity already exists, skipping creation"; exit 0
+        fi
+        _create_router() {
+          if ziti edge list edge-routers "name=\"$${ROUTER_NAME}\"" 2>/dev/null | grep -q "$${ROUTER_NAME}"; then
+            echo "INFO: edge router '$${ROUTER_NAME}' already exists"; return 0
+          fi
+          ziti edge create edge-router "$${ROUTER_NAME}" --jwt-output-file "$$JWT_FILE" --tunneler-enabled
+        }
+        retry 5 3 "create edge router" _create_router
+    environment:
+      ZROK2_DNS_ZONE: ${ZROK2_DNS_ZONE:?err}
+      ZITI_PWD: ${ZITI_PWD:?err}
+    depends_on:
+      ziti-controller:
+        condition: service_healthy
+    volumes:
+      - ziti-router-data:/ziti-router
+    networks:
+      - zrok2
+
+  ziti-router:
+    image: docker.io/openziti/ziti-router:${ZITI_TAG}
+    <<: *logging
+    environment:
+      ZITI_BOOTSTRAP: "true"
+      ZITI_BOOTSTRAP_ENROLLMENT: "true"
+      ZITI_BOOTSTRAP_CONFIG: "true"
+      ZITI_AUTO_RENEW_CERTS: "true"
+      ZITI_CTRL_ADVERTISED_ADDRESS: ziti.${ZROK2_DNS_ZONE}
+      ZITI_CTRL_ADVERTISED_PORT: "1280"
+      ZITI_ROUTER_ADVERTISED_ADDRESS: router.${ZROK2_DNS_ZONE}
+      ZITI_ROUTER_PORT: "3022"
+      ZITI_ROUTER_NAME: zrok2-router
+      ZITI_ENROLL_TOKEN: /ziti-router/zrok2-router.jwt
+      PFXLOG_NO_JSON: "true"
+    depends_on:
+      ziti-router-init:
+        condition: service_completed_successfully
+    volumes:
+      - ziti-router-data:/ziti-router
+    ports:
+      - "0.0.0.0:3022:3022"
+    networks:
+      zrok2:
+        aliases:
+          - router.${ZROK2_DNS_ZONE}
+    healthcheck:
+      test: ["CMD", "ziti", "agent", "stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    mem_limit: 128m
+    restart: unless-stopped
+
+  # Required: the dynamic frontend resolves share names over AMQP.
+  rabbitmq:
+    image: rabbitmq:${RABBITMQ_TAG}
+    <<: *logging
+    # A fixed hostname keeps the node name, and so its data directory, stable
+    # across container recreation.
+    hostname: rabbitmq
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./rabbitmq/30-zrok.conf:/etc/rabbitmq/conf.d/30-zrok.conf:ro
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    networks:
+      - zrok2
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    mem_limit: 256m
+    restart: unless-stopped
+
+  # One-shot: writes ctrl.yaml/frontend.yaml and bootstraps zrok2 against Ziti.
+  zrok2-init:
+    <<: [*zrok2-image, *logging]
+    user: "0:0"
+    entrypoint: ["/bin/bash", "/bootstrap/entrypoint-init.bash"]
+    environment:
+      ZROK2_DNS_ZONE: ${ZROK2_DNS_ZONE:?err}
+      ZROK2_ADMIN_TOKEN: ${ZROK2_ADMIN_TOKEN:?err}
+      ZITI_PWD: ${ZITI_PWD:?err}
+      ZITI_USER: admin
+      ZITI_CTRL_PORT: "1280"
+      ZROK2_CTRL_PORT: "18080"
+      ZROK2_FRONTEND_PORT: "8080"
+      ZROK2_STORE_TYPE: sqlite3
+      ZROK2_AMQP_URL: amqp://zrok2:${RABBITMQ_PASSWORD:?err}@rabbitmq:5672
+      ZROK2_METRICS_ENABLED: "false"
+      HOME: /var/lib/zrok2
+    depends_on:
+      ziti-controller:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - zrok2-config:/var/lib/zrok2
+      - ./entrypoint-init.bash:/bootstrap/entrypoint-init.bash:ro
+    networks:
+      - zrok2
+    mem_limit: 256m
+
+  # Serves the API and the web console; reached only through Caddy.
+  zrok2-controller:
+    <<: [*zrok2-image, *logging]
+    command: ["controller", "/var/lib/zrok2/config/ctrl.yaml"]
+    environment:
+      ZROK2_ADMIN_TOKEN: ${ZROK2_ADMIN_TOKEN:?err}
+      ZROK2_API_ENDPOINT: http://127.0.0.1:18080
+      HOME: /var/lib/zrok2
+    # Binds its Ziti service once at startup, so the router must be up first.
+    depends_on:
+      zrok2-init:
+        condition: service_completed_successfully
+      ziti-router:
+        condition: service_healthy
+    volumes:
+      - zrok2-config:/var/lib/zrok2
+    networks:
+      zrok2:
+        aliases:
+          - zrok2.${ZROK2_DNS_ZONE}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:18080/api/v1/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    mem_limit: 160m
+    restart: unless-stopped
+
+  # One-shot: copies only the files the internet-facing frontend needs into its
+  # own volume, so it cannot read ctrl.yaml, the database or admin credentials.
+  zrok2-frontend-files:
+    <<: [*zrok2-image, *logging]
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mkdir -p /dst/config /dst/.zrok2/identities
+        cp /src/config/frontend.yaml /src/config/public.json /dst/config/
+        cp /src/.zrok2/metadata.json /dst/.zrok2/
+        cp /src/.zrok2/identities/public.json /dst/.zrok2/identities/
+        chown -R 2171:2171 /dst
+        chmod -R go-rwx /dst
+    depends_on:
+      zrok2-init:
+        condition: service_completed_successfully
+    volumes:
+      - zrok2-config:/src:ro
+      - zrok2-frontend:/dst
+    network_mode: none
+
+  zrok2-frontend:
+    <<: [*zrok2-image, *logging]
+    command: ["access", "dynamicProxy", "/var/lib/zrok2/config/frontend.yaml"]
+    environment:
+      ZROK2_API_ENDPOINT: http://zrok2-controller:18080
+      HOME: /var/lib/zrok2
+    depends_on:
+      zrok2-controller:
+        condition: service_healthy
+      zrok2-frontend-files:
+        condition: service_completed_successfully
+    volumes:
+      - zrok2-frontend:/var/lib/zrok2:ro
+    networks:
+      - zrok2
+    mem_limit: 128m
+    restart: unless-stopped
+
+  caddy:
+    image: ${CADDY_IMAGE:?err}
+    # Built on the operator's machine and loaded by Ansible; never pulled.
+    pull_policy: never
+    <<: *logging
+    environment:
+      ZROK2_DNS_ZONE: ${ZROK2_DNS_ZONE:?err}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?err}
+      CADDY_ACME_CA: ${CADDY_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+    depends_on:
+      zrok2-controller:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - zrok2
+    mem_limit: 96m
+    restart: unless-stopped
+
+networks:
+  zrok2:
+    driver: bridge
+
+volumes:
+  ziti-ctrl-data:
+  ziti-router-data:
+  zrok2-config:
+  zrok2-frontend:
+  rabbitmq-data:
+  caddy-data:
+  caddy-config:

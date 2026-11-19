@@ -1,0 +1,95 @@
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - unattended-upgrades
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable automatic security updates
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    mode: "0644"
+
+# Swap
+- name: Check for swap file
+  ansible.builtin.stat:
+    path: /swapfile
+  register: swapfile
+
+- name: Create swap file
+  ansible.builtin.command: "fallocate -l {{ swap_size_mb }}M /swapfile"
+  when: not swapfile.stat.exists
+
+- name: Secure swap file
+  ansible.builtin.file:
+    path: /swapfile
+    mode: "0600"
+
+- name: Format swap file
+  ansible.builtin.command: mkswap /swapfile
+  when: not swapfile.stat.exists
+
+- name: Check active swap
+  ansible.builtin.command: swapon --show=NAME --noheadings
+  register: active_swap
+  changed_when: false
+
+- name: Enable swap file
+  ansible.builtin.command: swapon /swapfile
+  when: "'/swapfile' not in active_swap.stdout"
+
+- name: Persist swap file
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: /swapfile none swap sw 0 0
+    state: present
+
+- name: Prefer RAM over swap
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-zrok.conf
+    content: "vm.swappiness = 10\n"
+    mode: "0644"
+  notify: Apply sysctl
+
+# snapd: Oracle Cloud Agent ships as a snap on Ubuntu, so snapd stays when it is installed.
+- name: List snaps
+  ansible.builtin.command: snap list
+  register: snaps
+  changed_when: false
+  failed_when: false
+
+- name: Stop snapd when nothing needs it
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - snapd.socket
+    - snapd.service
+  when:
+    - snaps.rc == 0
+    - "'oracle-cloud-agent' not in snaps.stdout"
+  failed_when: false
+
+# SSH
+- name: Harden SSH
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-zrok-hardening.conf
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      X11Forwarding no
+      # Probe idle clients so NAT devices keep the connection open and dead
+      # sessions are closed after about 90 seconds instead of lingering.
+      ClientAliveInterval 30
+      ClientAliveCountMax 3
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Restart ssh

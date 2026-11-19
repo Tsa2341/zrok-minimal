@@ -1,0 +1,7 @@
+- name: Deploy zrok-minimal
+  hosts: zrok
+  become: true
+  roles:
+    - { role: base, tags: [base] }
+    - { role: docker, tags: [docker] }
+    - { role: zrok, tags: [zrok] }

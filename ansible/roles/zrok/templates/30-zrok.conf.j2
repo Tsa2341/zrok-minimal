@@ -1,0 +1,5 @@
+# Managed by Ansible (zrok-minimal).
+# default_user/default_pass only apply when the node's database is first created.
+default_user = zrok2
+default_pass = {{ rabbitmq_password }}
+vm_memory_high_watermark.absolute = {{ rabbitmq_memory_watermark }}

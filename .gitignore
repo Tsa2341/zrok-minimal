@@ -1,0 +1,6 @@
+ansible/.secrets/
+ansible/.build/
+ansible/group_vars/all/vault.yml
+ansible/group_vars/all/zone.yml
+.venv/
+*.retry

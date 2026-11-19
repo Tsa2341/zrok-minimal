@@ -1,0 +1,3 @@
+# Copy to zone.yml (git-ignored) and set your zone.
+# DNS zone with A records for <zone> and *.<zone> pointing at the server.
+zrok_dns_zone: share.example.com

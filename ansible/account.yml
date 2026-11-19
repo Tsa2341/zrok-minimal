@@ -1,0 +1,45 @@
+- name: Create a zrok account
+  hosts: zrok
+  gather_facts: false
+  vars_prompt:
+    - name: account_email
+      prompt: Account email
+      private: false
+    - name: account_password
+      prompt: Account password
+      private: true
+      confirm: true
+  tasks:
+    # zrok's create-account path does not enforce password rules, so only warn.
+    - name: Check the password against zrok's rules
+      ansible.builtin.include_tasks: tasks/password-rules.yml
+      vars:
+        password_rules_strict: false
+
+    - name: Look up the account
+      ansible.builtin.include_tasks: tasks/admin-api.yml
+
+    - name: Stop when the account already exists
+      ansible.builtin.fail:
+        msg: >-
+          An account for {{ account_email }} already exists. To set a new password, run
+          password.yml. To get a new enable token, log in to the web console and use
+          "Enable your first environment" or delete the account first with
+          "zrok2 admin delete account".
+      when: account_exists | bool
+
+    - name: Create the account
+      ansible.builtin.uri:
+        url: "{{ zrok_api }}/account"
+        method: POST
+        headers: "{{ zrok_api_headers }}"
+        body_format: json
+        body: { email: "{{ account_email }}", password: "{{ account_password }}" }
+        status_code: [201]
+      register: account
+      delegate_to: localhost
+      no_log: true
+
+    - name: Show the enable token
+      ansible.builtin.debug:
+        msg: "Enable token: {{ account.json.accountToken }}"

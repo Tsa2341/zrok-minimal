@@ -1,0 +1,28 @@
+# zrok_dns_zone is set in zone.yml (git-ignored); see zone.yml.example.
+
+zrok_dir: /opt/zrok-minimal
+
+# Pinned image versions.
+zrok2_tag: "2.0.11"
+ziti_tag: "2.0.8"
+rabbitmq_tag: "3.13.7-alpine"
+caddy_version: "2.11.9"
+
+# Use the Let's Encrypt staging CA while testing to avoid rate limits:
+# https://acme-staging-v02.api.letsencrypt.org/directory
+caddy_acme_ca: https://acme-v02.api.letsencrypt.org/directory
+
+# RabbitMQ blocks publishers above this; kept under the container's 256m limit.
+rabbitmq_memory_watermark: 160MiB
+
+swap_size_mb: 2048
+
+# Generated once on first run and kept locally (git-ignored) so reruns reuse them.
+zrok_secret_dir: "{{ playbook_dir }}/.secrets"
+zrok2_admin_token: "{{ lookup('ansible.builtin.password', zrok_secret_dir + '/zrok2_admin_token', length=48, chars=['ascii_letters', 'digits']) }}"
+ziti_pwd: "{{ lookup('ansible.builtin.password', zrok_secret_dir + '/ziti_pwd', length=32, chars=['ascii_letters', 'digits']) }}"
+rabbitmq_password: "{{ lookup('ansible.builtin.password', zrok_secret_dir + '/rabbitmq_password', length=32, chars=['ascii_letters', 'digits']) }}"
+
+# Cloudflare API token (Zone.DNS edit on the zone), stored in vault.yml as
+# vault_cloudflare_api_token.
+cloudflare_api_token: "{{ vault_cloudflare_api_token }}"
