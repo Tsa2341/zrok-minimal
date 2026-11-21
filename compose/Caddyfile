@@ -10,6 +10,14 @@ zrok2.{$ZROK2_DNS_ZONE} {
 	}
 }
 
+# OAuth login callbacks (used when Google login is enabled)
+oauth.{$ZROK2_DNS_ZONE} {
+	reverse_proxy zrok2-frontend:8181
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+}
+
 # Public shares
 *.{$ZROK2_DNS_ZONE} {
 	reverse_proxy zrok2-frontend:8080

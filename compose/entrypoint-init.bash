@@ -211,7 +211,7 @@ retry 5 3 "create dynamic frontend" step_create_frontend
 # zrok-minimal: step_create_frontend takes the first awk field of a bordered
 # table, which is the "│" border, not the token. Read the token column instead.
 FRONTEND_TOKEN=$(zrok2 admin list frontends 2>/dev/null \
-    | awk -F'│' '$4 ~ /^ *public *$/ { gsub(/ /, "", $2); print $2; exit }')
+    | awk -F'│' '!found && $4 ~ /^ *public *$/ { gsub(/ /, "", $2); print $2; found = 1 }')
 [[ "$FRONTEND_TOKEN" =~ ^[A-Za-z0-9]+$ ]] || die "Could not read the public frontend token"
 info "Frontend token: $FRONTEND_TOKEN"
 
@@ -274,6 +274,31 @@ controller:
   identity_path: ${CONFIG_DIR}/public.json
   service_name: dynamicProxyController
 FEEOF
+
+# zrok-minimal: Google login for shares started with --oauth-provider google.
+if [[ -n "${ZROK2_OAUTH_GOOGLE_CLIENT_ID:-}" ]]; then
+    : "${ZROK2_OAUTH_GOOGLE_CLIENT_SECRET:?required with ZROK2_OAUTH_GOOGLE_CLIENT_ID}"
+    : "${ZROK2_OAUTH_SIGNING_KEY:?required with ZROK2_OAUTH_GOOGLE_CLIENT_ID}"
+    : "${ZROK2_OAUTH_ENCRYPTION_KEY:?required with ZROK2_OAUTH_GOOGLE_CLIENT_ID}"
+    cat >> "$FRONTEND_CONFIG" <<OAUTHEOF
+
+oauth:
+  bind_address: 0.0.0.0:8181
+  endpoint_url: "https://oauth.${ZROK2_DNS_ZONE}"
+  cookie_name: zrok-auth-session
+  cookie_domain: "${ZROK2_DNS_ZONE}"
+  session_lifetime: 6h
+  intermediate_lifetime: 5m
+  signing_key: "${ZROK2_OAUTH_SIGNING_KEY}"
+  encryption_key: "${ZROK2_OAUTH_ENCRYPTION_KEY}"
+  providers:
+    - name: google
+      type: google
+      client_id: "${ZROK2_OAUTH_GOOGLE_CLIENT_ID}"
+      client_secret: "${ZROK2_OAUTH_GOOGLE_CLIENT_SECRET}"
+OAUTHEOF
+    info "Google OAuth enabled at https://oauth.${ZROK2_DNS_ZONE}"
+fi
 chmod 640 "$FRONTEND_CONFIG"
 info "Full frontend config written to $FRONTEND_CONFIG"
 

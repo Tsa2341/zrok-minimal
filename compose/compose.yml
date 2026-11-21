@@ -41,12 +41,14 @@ services:
       zrok2:
         aliases:
           - ziti.${ZROK2_DNS_ZONE}
+    # Port checks: a CLI or VM per check overloads a throttled 1-OCPU VM.
     healthcheck:
-      test: ["CMD", "ziti", "agent", "stats"]
-      interval: 10s
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/1280"]
+      interval: 60s
       timeout: 5s
-      retries: 12
-      start_period: 60s
+      retries: 5
+      start_period: 120s
+      start_interval: 5s
     mem_limit: 200m
     restart: unless-stopped
 
@@ -120,11 +122,12 @@ services:
         aliases:
           - router.${ZROK2_DNS_ZONE}
     healthcheck:
-      test: ["CMD", "ziti", "agent", "stats"]
-      interval: 10s
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3022"]
+      interval: 60s
       timeout: 5s
-      retries: 12
-      start_period: 60s
+      retries: 5
+      start_period: 120s
+      start_interval: 5s
     mem_limit: 128m
     restart: unless-stopped
 
@@ -142,11 +145,12 @@ services:
     networks:
       - zrok2
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
+      test: ["CMD", "nc", "-z", "127.0.0.1", "5672"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+      start_interval: 5s
     mem_limit: 256m
     restart: unless-stopped
 
@@ -166,6 +170,11 @@ services:
       ZROK2_STORE_TYPE: sqlite3
       ZROK2_AMQP_URL: amqp://zrok2:${RABBITMQ_PASSWORD:?err}@rabbitmq:5672
       ZROK2_METRICS_ENABLED: "false"
+      # Google login is enabled only when the client ID is set.
+      ZROK2_OAUTH_GOOGLE_CLIENT_ID: ${ZROK2_OAUTH_GOOGLE_CLIENT_ID:-}
+      ZROK2_OAUTH_GOOGLE_CLIENT_SECRET: ${ZROK2_OAUTH_GOOGLE_CLIENT_SECRET:-}
+      ZROK2_OAUTH_SIGNING_KEY: ${ZROK2_OAUTH_SIGNING_KEY:-}
+      ZROK2_OAUTH_ENCRYPTION_KEY: ${ZROK2_OAUTH_ENCRYPTION_KEY:-}
       HOME: /var/lib/zrok2
     depends_on:
       ziti-controller:
@@ -201,10 +210,11 @@ services:
           - zrok2.${ZROK2_DNS_ZONE}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:18080/api/v1/version"]
-      interval: 10s
+      interval: 60s
       timeout: 5s
-      retries: 12
-      start_period: 30s
+      retries: 5
+      start_period: 120s
+      start_interval: 5s
     mem_limit: 160m
     restart: unless-stopped
 

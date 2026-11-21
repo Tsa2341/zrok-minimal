@@ -42,6 +42,9 @@ Measured memory with no shares running: about 290 MB for all containers.
 - The internet-facing frontend gets its own volume holding only its config and
   identity. Upstream mounts the whole config volume, which exposes `ctrl.yaml`
   (admin token, Ziti and RabbitMQ passwords), the database and the CLI session.
+- Health checks are TCP or HTTP probes every 60 s. Upstream's checks start a
+  `ziti` CLI and an Erlang VM every 5–10 s, which piles up and overloads a
+  throttled 1-OCPU VM.
 - `entrypoint-init.bash` reads the frontend token from the right table column.
   Upstream takes the table border (`│`) as the token, so public share names never
   resolve.
@@ -187,6 +190,44 @@ zrok2 share public http://127.0.0.1:3000 --headless --name-selection public:myap
 
 The share is then at `https://myapp.<zone>`. Creating the name and sharing are
 separate commands in zrok2 2.0.11.
+
+### Private names
+
+Protect a named share with a password the browser asks for:
+
+```bash
+zrok2 share public http://127.0.0.1:3000 --headless --name-selection public:myapp --basic-auth-from-stdin
+```
+
+or with Google login (set up below):
+
+```bash
+zrok2 share public http://127.0.0.1:3000 --headless --name-selection public:myapp --oauth-provider google --oauth-email-domain 'you@gmail.com'
+```
+
+### Google login
+
+1. In Google Cloud Console → APIs & Services, set up the OAuth consent screen
+   with the `.../auth/userinfo.email` scope (add yourself as a test user while
+   the app is in testing), then create an **OAuth client ID** of type **Web
+   application** with this redirect URI:
+
+   ```text
+   https://oauth.<zone>/google/auth/callback
+   ```
+
+2. Add the client ID and secret to the vault
+   (`../.venv/bin/ansible-vault edit group_vars/all/vault.yml`):
+
+   ```yaml
+   vault_oauth_google_client_id: "<client-id>"
+   vault_oauth_google_client_secret: "<client-secret>"
+   ```
+
+3. Re-run `site.yml`. The signing and encryption keys are generated into
+   `ansible/.secrets/`, and `https://oauth.<zone>` serves the login callbacks.
+
+Without those vault entries, Google login stays off.
 
 ## Operating
 

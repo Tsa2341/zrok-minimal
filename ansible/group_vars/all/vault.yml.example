@@ -1,4 +1,8 @@
 # Create the real, encrypted file with:
 #   ansible-vault create group_vars/all/vault.yml
-# and put this line in it with your token:
+# (or edit it with: ansible-vault edit group_vars/all/vault.yml)
 vault_cloudflare_api_token: "replace-with-cloudflare-token"
+
+# Optional: Google login for shares (--oauth-provider google).
+# vault_oauth_google_client_id: "123-abc.apps.googleusercontent.com"
+# vault_oauth_google_client_secret: "replace-with-client-secret"

@@ -107,9 +107,11 @@
   register: pull
   changed_when: false
 
+# Bind-mounted file changes are invisible to Compose, so recreate everything
+# (including the one-shot init containers) whenever stack files change.
 - name: Start the stack
   ansible.builtin.command:
-    cmd: docker compose up -d --remove-orphans
+    argv: "{{ ['docker', 'compose', 'up', '-d', '--remove-orphans'] + (['--force-recreate'] if (stack_files is changed or env_file is changed or rabbitmq_conf is changed) else []) }}"
     chdir: "{{ zrok_dir }}"
   changed_when: true
 
